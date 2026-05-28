@@ -102,7 +102,7 @@ resource "azuread_application_redirect_uris" "this" {
   type           = "Web"
 
   redirect_uris = [
-    #"https://${azurerm_container_app.mcp.ingress[0].fqdn}/.auth/login/aad/callback",
+    "https://${azurerm_container_app.mcp.ingress[0].fqdn}/auth/callback",
     "http://localhost:8000/auth/callback"
   ]
 }
@@ -201,11 +201,15 @@ resource "azurerm_container_app" "mcp" {
       }
       env {
         name = "BASE_URL"
-        value = "${azurerm_container_app_environment.this.default_domain}"
+        value = "https://aca-${local.func_name}.${azurerm_container_app_environment.this.default_domain}"
       }
       env {
         name = "PROJECT_ENDPOINT"
         value = var.project_endpoint
+      }
+      env {
+        name = "AGENT_ID"
+        value = var.agent_id
       }
 
     }
@@ -222,7 +226,7 @@ resource "azurerm_container_app" "mcp" {
   ingress {
     allow_insecure_connections = false
     external_enabled           = true
-    target_port                = 80
+    target_port                = 8000
     transport                  = "auto"
     traffic_weight {
       latest_revision = true
