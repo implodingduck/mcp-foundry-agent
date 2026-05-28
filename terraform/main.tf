@@ -67,12 +67,12 @@ resource "azuread_application" "this" {
     }
   }
 
-  # Request delegated permission to Azure Cognitive Services for the OBO flow
+  # Request delegated permission to Azure AI Foundry (Azure ML Services) for the OBO flow
   required_resource_access {
-    resource_app_id = "7c33bfcb-8d33-48d6-8e2e-4b4d5459e3f4" # Azure Cognitive Services
+    resource_app_id = "18a66f5f-dbdf-4c17-9dd7-1634712a9cbe" # Azure Machine Learning Services (https://ai.azure.com)
 
     resource_access {
-      id   = "4149d18b-cf58-4496-862f-0a9700390a1a" # user_impersonation (delegated)
+      id   = "1a7925b5-f871-417a-9b8b-303f9f29fa10" # user_impersonation (delegated)
       type = "Scope"
     }
   }
@@ -110,6 +110,18 @@ resource "azuread_application_redirect_uris" "this" {
 resource "azuread_service_principal" "this" {
   client_id = azuread_application.this.client_id
   owners    = [data.azuread_client_config.current.object_id]
+}
+
+# Look up the Azure ML Services (ai.azure.com) service principal in this tenant
+data "azuread_service_principal" "ai_foundry" {
+  client_id = "18a66f5f-dbdf-4c17-9dd7-1634712a9cbe"
+}
+
+# Grant admin consent for the AI Foundry user_impersonation delegated permission
+resource "azuread_service_principal_delegated_permission_grant" "ai_foundry" {
+  service_principal_object_id          = azuread_service_principal.this.object_id
+  resource_service_principal_object_id = data.azuread_service_principal.ai_foundry.object_id
+  claim_values                         = ["user_impersonation"]
 }
 
 resource "azuread_application_identifier_uri" "this" {

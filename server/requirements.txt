@@ -1,5 +1,6 @@
 fastmcp
-azure-ai-agents
+azure-ai-projects
 azure-identity
 python-dotenv
 msal
+openai
