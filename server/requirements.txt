@@ -4,3 +4,4 @@ azure-identity
 python-dotenv
 msal
 openai
+PyJWT[crypto]

@@ -8,20 +8,101 @@ from fastmcp.server.dependencies import get_http_headers, get_access_token
 from azure.ai.projects import AIProjectClient
 from azure.core.credentials import AccessToken, TokenCredential
 from openai.types.responses.response_input_param import McpApprovalResponse, ResponseInputParam
+import jwt
+from jwt import PyJWKClient
+from mcp.server.auth.provider import AccessToken as MCPAccessToken
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-foundry-agent")
 
-auth_provider = AzureProvider(
-    client_id=os.environ.get("CLIENT_ID"),  # Your Azure App Client ID
-    client_secret=os.environ.get("CLIENT_SECRET"),                 # Your Azure App Client Secret
-    tenant_id=os.environ.get("TENANT_ID"), # Your Azure Tenant ID (REQUIRED)
-    base_url=os.environ.get("BASE_URL"),                   # Must match your App registration
-    required_scopes=["user_impersonation"],                 # At least one scope REQUIRED - name of scope from your App
-)
 
+class DirectEntraTokenVerifier:
+    """Validates raw Entra ID access tokens using Microsoft's JWKS endpoint."""
+
+    def __init__(self, tenant_id: str, client_id: str):
+        self.tenant_id = tenant_id
+        self.client_id = client_id
+        self.issuer = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+        self.audiences = [client_id, f"api://{client_id}"]
+        jwks_url = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
+        self._jwks_client = PyJWKClient(jwks_url, cache_keys=True)
+
+    async def verify_token(self, token: str) -> MCPAccessToken | None:
+        try:
+            signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+            decoded = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=self.audiences,
+                issuer=self.issuer,
+                options={"require": ["exp", "iat", "aud", "iss"]},
+            )
+
+            # Reject if tenant doesn't match
+            if decoded.get("tid") != self.tenant_id:
+                logger.debug("Direct Entra token rejected: tid mismatch")
+                return None
+
+            # Require delegated scopes (scp claim) to ensure this is an
+            # access token, not an ID token
+            scp = decoded.get("scp", "")
+            scopes = scp.split() if scp else []
+            if not scopes:
+                logger.debug("Direct Entra token rejected: no scp claim (may be an ID token)")
+                return None
+
+            client_id = decoded.get("azp") or decoded.get("appid") or "unknown"
+            logger.info("Direct Entra token validated (sub=%s, scopes=%s)", decoded.get("sub"), scopes)
+
+            return MCPAccessToken(
+                token=token,
+                client_id=client_id,
+                scopes=scopes,
+                expires_at=decoded.get("exp"),
+            )
+
+        except jwt.ExpiredSignatureError:
+            logger.debug("Direct Entra token rejected: expired")
+            return None
+        except jwt.InvalidTokenError as e:
+            logger.debug("Direct Entra token rejected: %s", e)
+            return None
+        except Exception as e:
+            logger.debug("Direct Entra token verification error: %s", e)
+            return None
+
+
+class DualAuthProvider(AzureProvider):
+    """Accepts both FastMCP OAuth flow tokens and direct Entra ID access tokens."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._entra_verifier = DirectEntraTokenVerifier(
+            tenant_id=kwargs["tenant_id"],
+            client_id=kwargs["client_id"],
+        )
+
+    async def verify_token(self, token: str) -> MCPAccessToken | None:
+        # Try the native FastMCP OAuth flow first
+        result = await super().verify_token(token)
+        if result is not None:
+            return result
+
+        # Fall back to direct Entra ID token validation
+        logger.debug("Native OAuth verification failed, trying direct Entra ID token")
+        return await self._entra_verifier.verify_token(token)
+
+
+auth_provider = DualAuthProvider(
+    client_id=os.environ.get("CLIENT_ID"),
+    client_secret=os.environ.get("CLIENT_SECRET"),
+    tenant_id=os.environ.get("TENANT_ID"),
+    base_url=os.environ.get("BASE_URL"),
+    required_scopes=["user_impersonation"],
+)
 
 
 mcp = FastMCP("FastMCP call Foundry Agent", auth=auth_provider)
